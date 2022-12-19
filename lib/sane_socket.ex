@@ -4,7 +4,10 @@ defmodule SaneSocket do
 
   # %{application_name: "sane_test", port: 6566}
   #
-  @type recv_array_item_function :: (:gen_tcp.socket() -> {:ok, [binary()]} | {:error, binary()})
+  @type recv_array_item_function ::
+          (:gen_tcp.socket() -> {:ok, [binary()]} | {:ok, map()} | {:error, binary()})
+
+  @type sane_device :: %{name: binary(), vendor: binary(), model: binary(), type: binary()}
 
   def start_link(%{port: _port, application_name: _application_name} = init_values) do
     Agent.start_link(fn -> init_values end, name: __MODULE__)
@@ -121,9 +124,11 @@ defmodule SaneSocket do
     end
   end
 
-  @spec recv_array_items(:gen_tcp.socket(), recv_array_item_function(),
+  @spec recv_array_items(
+          :gen_tcp.socket(),
+          recv_array_item_function(),
           array_length :: non_neg_integer()
-        ) :: {:ok, [binary()]} | {:error,reason :: binary()}
+        ) :: {:ok, [binary()]} | {:error, reason :: binary()}
   def recv_array_items(socket, recv_item_function, array_length) do
     if array_length > 0 do
       recv_array_item(socket, recv_item_function, array_length, [])
@@ -145,7 +150,9 @@ defmodule SaneSocket do
     end
   end
 
-  @spec recv_array_item(:gen_tcp.socket(), recv_array_item_function(), non_neg_integer(), [binary()]) ::
+  @spec recv_array_item(:gen_tcp.socket(), recv_array_item_function(), non_neg_integer(), [
+          binary()
+        ]) ::
           {:ok, items: [binary()]} | {:error, binary()}
   def recv_array_item(socket, recv_item_function, remaining_items, items)
       when remaining_items > 0 do
@@ -160,6 +167,58 @@ defmodule SaneSocket do
 
   def recv_array_item(_socket, _recv_item_function, 0, items), do: items
 
+  @spec recv_pointer(:gen_tcp.socket(), (:gen_tcp.socket() -> {:ok, map()} | {:error, binary()})) ::
+          {:ok, map()} | {:ok, %{}} | {:error, binary()}
+  def recv_pointer(socket, recv_pointer_function) do
+    case recv_word(socket) do
+      {:ok, 0} ->
+        %{}
+
+      {:ok, _pointer} ->
+        recv_pointer_function.(socket)
+
+      {:error, reason} ->
+        Logger.warn("Could not retrieve pointer because of #{inspect(reason)}")
+        {:error, "Error while retrieving pointer"}
+    end
+  end
+
+  @spec recv_sane_device(:gen_tcp.socket()) :: {:ok, sane_device()} | {:error, binary()}
+  def recv_sane_device(socket) do
+    recv_sane_structure(socket,
+      name: &recv_string/1,
+      vendor: &recv_string/1,
+      model: &recv_string/1,
+      type: &recv_string/1
+    )
+  end
+
+  @spec recv_sane_structure(:gen_tcp.socket(), keyword()) :: {:ok, map()} | {:error, binary()}
+  def recv_sane_structure(socket, keywords) do
+    structure =
+      for {field_name, retrieve_function} <- keywords, into: %{}, uniq: true do
+        case retrieve_function.(socket) do
+          {:ok, field} ->
+            {field_name, field}
+
+          {:error, reason} ->
+            Logger.warn(
+              "Could not retrieve struct field #{inspect(field_name)} because of #{inspect(reason)}"
+            )
+
+            {:error, reason}
+        end
+      end
+
+    if Map.has_key?(structure, :error) do
+      {:error, "Failure while retrieving structure"}
+    else
+      {:ok, structure}
+    end
+  end
+
+  @spec map_status_code(0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11) ::
+          :ok | {:error, binary()}
   def map_status_code(code) do
     case code do
       0 -> :ok
