@@ -1,11 +1,10 @@
 defmodule SaneEncoder do
-
   @type sane_device :: %{
-    name: binary(),
-    vendor: binary(),
-    model: binary(),
-    type: binary()
-  }
+          name: binary(),
+          vendor: binary(),
+          model: binary(),
+          type: binary()
+        }
 
   @spec sane_version(integer(), integer(), integer()) :: binary()
   def sane_version(major, minor, patch) do
@@ -31,10 +30,21 @@ defmodule SaneEncoder do
     integers |> :erlang.list_to_binary() |> :binary.decode_unsigned()
   end
 
-  @spec from_sane_version([integer(),...]) :: %{major: integer(),minor: integer(),patch: integer}
-  def from_sane_version([major,minor,_,patch]) do
-    %{major: major,minor: minor,patch: patch}
+  @spec from_sane_version([integer(), ...]) :: %{
+          major: integer(),
+          minor: integer(),
+          patch: integer
+        }
+  def from_sane_version([major, minor, _, patch]) do
+    %{major: major, minor: minor, patch: patch}
   end
 
-
+  def from_sane_string(string, string_length) do
+    if Enum.at(string, string_length - 1) != 0 do
+      {:error, "String not correctly received"}
+    else
+      string_without_null = Enum.drop(string, -1)
+      {:ok, :erlang.list_to_binary(string_without_null) |> String.graphemes() |> Enum.join()}
+    end
+  end
 end

@@ -41,7 +41,7 @@ defmodule SaneSocket do
   end
 
   def send_init(socket, application_name) do
-    with :ok <- :gen_tcp.send(socket, 0 |> SaneEncoder.to_sane_word()) |> dbg(),
+    with :ok <- send_word(socket, 0) |> dbg(),
          :ok <- :gen_tcp.send(socket, SaneEncoder.sane_version(1, 0, 3)) |> dbg(),
          :ok <- send_string(socket, application_name) |> dbg(),
          {:ok, packet} <- :gen_tcp.recv(socket, 4) |> dbg(),
@@ -54,6 +54,15 @@ defmodule SaneSocket do
       {:error, reason} ->
         Logger.warn("Could not send init because of #{inspect(reason)}")
         {:error, "Init not working"}
+    end
+  end
+
+  def send_word(socket, word) do
+    with encoded_word <- SaneEncoder.to_sane_word(word),
+         :ok <- :gen_tcp.send(socket, encoded_word) do
+      :ok
+    else
+      {:error, reason} -> {:error, reason}
     end
   end
 
@@ -81,27 +90,13 @@ defmodule SaneSocket do
   end
 
   def list_all_devices(socket) do
-    with :ok <- :gen_tcp.send(socket, 1 |> SaneEncoder.to_sane_word()),
-         {:ok, packet} <- :gen_tcp.recv(socket, 4),
-         status = SaneEncoder.from_sane_word(packet),
+    with :ok <- send_word(socket, 1),
+         {:ok, status} <- recv_word(socket),
          :ok <- map_status_code(status),
          # first word encodes the length of the array
-         {:ok, word_length} <- :gen_tcp.recv(socket, 4),
-         word_length = SaneEncoder.from_sane_word(word_length) |> dbg() do
-      if word_length > 0 do
-        # read rest of bytes to get a clear socket
-        recv_string(socket) |> dbg()
-
-        for _index <- 1..word_length do
-          # One empty pointer because this is a pointer to pointer to pointer
-          with {:ok, name} <- recv_string(socket) |> dbg(),
-               {:ok, vendor} <- recv_string(socket) |> dbg(),
-               {:ok, model} <- recv_string(socket) |> dbg(),
-               {:ok, type} <- recv_string(socket) |> dbg() do
-            [name, vendor, model, type]
-          end
-        end
-      end
+         {:ok, devices} <-
+           recv_array(socket, fn socket -> recv_pointer(socket, &recv_sane_device/1) end) do
+      {:ok, devices}
     end
   end
 
@@ -117,9 +112,11 @@ defmodule SaneSocket do
          string_length = SaneEncoder.from_sane_word(string_length) do
       if string_length > 0 do
         case :gen_tcp.recv(socket, string_length) |> dbg() do
-          {:ok, string} -> {:ok, :erlang.list_to_binary(string) |> String.graphemes()}
+          {:ok, string} -> SaneEncoder.from_sane_string(string, string_length)
           {:error, reason} -> {:erro, reason}
         end
+      else
+        {:ok, ""}
       end
     end
   end
@@ -140,7 +137,7 @@ defmodule SaneSocket do
   @spec recv_array(:gen_tcp.socket(), recv_array_item_function()) ::
           {:ok, [binary()]} | {:error, binary()}
   def recv_array(socket, recv_item_function) do
-    case recv_word(socket) do
+    case recv_word(socket) |> dbg() do
       {:ok, array_length} ->
         recv_array_items(socket, recv_item_function, array_length)
 
@@ -155,10 +152,15 @@ defmodule SaneSocket do
         ]) ::
           {:ok, items: [binary()]} | {:error, binary()}
   def recv_array_item(socket, recv_item_function, remaining_items, items)
-      when remaining_items > 0 do
+      when remaining_items > 0 and is_list(items) do
     case recv_item_function.(socket) do
       {:ok, new_items} ->
-        recv_array_item(socket, recv_item_function, remaining_items - 1, items ++ new_items)
+        recv_array_item(
+          socket,
+          recv_item_function,
+          remaining_items - 1,
+          items ++ List.wrap(new_items)
+        )
 
       {:error, reason} ->
         {:error, reason}
@@ -170,12 +172,12 @@ defmodule SaneSocket do
   @spec recv_pointer(:gen_tcp.socket(), (:gen_tcp.socket() -> {:ok, map()} | {:error, binary()})) ::
           {:ok, map()} | {:ok, %{}} | {:error, binary()}
   def recv_pointer(socket, recv_pointer_function) do
-    case recv_word(socket) do
+    case recv_word(socket) |> dbg() do
       {:ok, 0} ->
-        %{}
+        recv_pointer_function.(socket) |> dbg()
 
-      {:ok, _pointer} ->
-        recv_pointer_function.(socket)
+      {:ok, pointer} when is_integer(pointer) ->
+        {:ok, %{}}
 
       {:error, reason} ->
         Logger.warn("Could not retrieve pointer because of #{inspect(reason)}")
@@ -195,9 +197,12 @@ defmodule SaneSocket do
 
   @spec recv_sane_structure(:gen_tcp.socket(), keyword()) :: {:ok, map()} | {:error, binary()}
   def recv_sane_structure(socket, keywords) do
+    require IEx
+    IEx.pry()
+
     structure =
       for {field_name, retrieve_function} <- keywords, into: %{}, uniq: true do
-        case retrieve_function.(socket) do
+        case retrieve_function.(socket) |> dbg() do
           {:ok, field} ->
             {field_name, field}
 
